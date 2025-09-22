@@ -16,17 +16,20 @@ import pickle
 class PreferenceDataset(Dataset):
     """Dataset class for loading preference pairs from Part 1 data"""
     
-    def __init__(self, preference_file, image_folder=None, transform=None, color_mode='RGB'):
+    def __init__(self, preference_file, image_folder, transform=None, color_mode='RGB'):
         """
         Args:
             preference_file: JSON file from Part 1
-            image_folder: Folder containing original images (if None, assumes crops are stored)
+            image_folder: Folder containing original images
             transform: Image transformations
             color_mode: 'RGB' or 'L' (grayscale)
         """
         with open(preference_file, 'r') as f:
             self.preferences = json.load(f)
         
+        if image_folder is None:
+            raise ValueError("image_folder is required to load original images for cropping")
+            
         self.image_folder = image_folder
         self.transform = transform
         self.color_mode = color_mode
@@ -34,7 +37,24 @@ class PreferenceDataset(Dataset):
         # Filter out skipped preferences (-1)
         self.preferences = [p for p in self.preferences if p['preference'] != -1]
         
+        # Get all unique images referenced in preferences
+        self.image_files = self._get_referenced_images()
+        
         print(f"Loaded {len(self.preferences)} preference pairs")
+        print(f"Found {len(self.image_files)} unique images referenced")
+    
+    def _get_referenced_images(self):
+        """Get list of all image files referenced in the preference data"""
+        # For now, we'll need to match images based on the data we have
+        # This is a limitation - ideally Part 1 should save image paths
+        image_extensions = {'.jpg', '.jpeg', '.png', '.bmp', '.tiff', '.JPG', '.JPEG', '.PNG'}
+        
+        image_files = []
+        for file in os.listdir(self.image_folder):
+            if any(file.lower().endswith(ext.lower()) for ext in image_extensions):
+                image_files.append(file)
+        
+        return sorted(image_files)
     
     def __len__(self):
         return len(self.preferences)
@@ -42,13 +62,10 @@ class PreferenceDataset(Dataset):
     def __getitem__(self, idx):
         pref = self.preferences[idx]
         
-        # For this implementation, we'll generate crops on-demand
-        # In practice, you might want to pre-generate and save crops
         try:
-            # Create dummy images for demonstration
-            # In real implementation, load the original image and crop
-            crop_a = self._create_crop_image(pref['crop_a'])
-            crop_b = self._create_crop_image(pref['crop_b'])
+            # Load original image and create crops
+            crop_a = self._create_crop_from_coordinates(pref['crop_a'], pref)
+            crop_b = self._create_crop_from_coordinates(pref['crop_b'], pref)
             
             if self.transform:
                 crop_a = self.transform(crop_a)
@@ -61,29 +78,87 @@ class PreferenceDataset(Dataset):
             
         except Exception as e:
             print(f"Error loading preference {idx}: {e}")
+            print(f"Preference data: {pref}")
             # Return dummy data if error
-            dummy_size = (224, 224) if self.color_mode == 'RGB' else (224, 224)
+            dummy_size = (224, 224)
             channels = 3 if self.color_mode == 'RGB' else 1
             dummy_tensor = torch.zeros(channels, *dummy_size)
             return dummy_tensor, dummy_tensor, torch.tensor(0, dtype=torch.long)
     
-    def _create_crop_image(self, crop_info):
-        """Create crop image from coordinates - placeholder implementation"""
-        # This is a placeholder - in real implementation, you would:
-        # 1. Load the original image
-        # 2. Extract the crop using crop_info['coordinates']
-        # 3. Resize to the expected size
+    def _find_matching_image(self, crop_info):
+        """Find the original image file that matches the crop info"""
+        # Since Part 1 doesn't save image paths, we need to match based on image size
+        # This is a workaround - ideally Part 1 should save the image filename
+        target_size = crop_info['image_size']  # (width, height)
         
-        coords = crop_info['coordinates']  # (x, y, w, h)
-        crop_size = (coords[2], coords[3])  # (width, height)
+        for img_file in self.image_files:
+            img_path = os.path.join(self.image_folder, img_file)
+            try:
+                with Image.open(img_path) as img:
+                    if img.size == target_size:
+                        return img_path
+            except Exception:
+                continue
         
-        # Create dummy image for demonstration
-        if self.color_mode == 'RGB':
-            dummy_img = Image.new('RGB', crop_size, color=(128, 128, 128))
-        else:
-            dummy_img = Image.new('L', crop_size, color=128)
+        # If no exact match found, return the first available image
+        # This is not ideal but prevents crashes
+        if self.image_files:
+            return os.path.join(self.image_folder, self.image_files[0])
+        
+        raise FileNotFoundError("No matching image found and no images available")
+    
+    def _create_crop_from_coordinates(self, crop_info, preference_record):
+        """Create crop image from coordinates"""
+        try:
+            # Try to use the stored image path first
+            if 'image_path' in preference_record and os.path.exists(preference_record['image_path']):
+                img_path = preference_record['image_path']
+            else:
+                # Fallback to finding matching image by size
+                img_path = self._find_matching_image(crop_info)
             
-        return dummy_img
+            # Load the original image
+            original_img = Image.open(img_path)
+            
+            # Convert to specified color mode
+            if self.color_mode == 'L' and original_img.mode != 'L':
+                original_img = original_img.convert('L')
+            elif self.color_mode == 'RGB' and original_img.mode != 'RGB':
+                original_img = original_img.convert('RGB')
+            
+            # Extract crop coordinates
+            coords = crop_info['coordinates']  # (x, y, width, height)
+            x, y, width, height = coords
+            
+            # Validate coordinates
+            img_width, img_height = original_img.size
+            x = max(0, min(x, img_width - width))
+            y = max(0, min(y, img_height - height))
+            width = min(width, img_width - x)
+            height = min(height, img_height - y)
+            
+            # Create crop box (left, top, right, bottom)
+            crop_box = (x, y, x + width, y + height)
+            
+            # Extract the crop
+            crop = original_img.crop(crop_box)
+            
+            # Ensure minimum size
+            if crop.size[0] < 10 or crop.size[1] < 10:
+                print(f"Warning: Very small crop {crop.size}, using fallback")
+                raise ValueError("Crop too small")
+            
+            return crop
+            
+        except Exception as e:
+            print(f"Error creating crop: {e}")
+            print(f"Crop info: {crop_info}")
+            
+            # Create fallback dummy image
+            if self.color_mode == 'RGB':
+                return Image.new('RGB', (224, 224), color=(128, 128, 128))
+            else:
+                return Image.new('L', (224, 224), color=128)
 
 class AestheticFeatureExtractor(nn.Module):
     """ResNet-based feature extractor fine-tuned for aesthetic preferences"""
@@ -377,8 +452,8 @@ def parse_arguments():
     # Data arguments
     parser.add_argument('--preference-file', type=str, required=True,
                        help='JSON file with preference data from Part 1')
-    parser.add_argument('--image-folder', type=str, default=None,
-                       help='Folder containing original images')
+    parser.add_argument('--image-folder', type=str, required=True,
+                       help='Folder containing original images used in Part 1')
     parser.add_argument('--color-mode', type=str, choices=['RGB', 'L'], default='RGB',
                        help='Color mode: RGB or L (grayscale)')
     

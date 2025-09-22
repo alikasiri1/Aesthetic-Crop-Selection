@@ -17,9 +17,10 @@ class PreferenceDataCollector:
         # Data storage
         self.preference_data = []
         self.current_image = None
+        self.current_image_path = None  # Store current image path
         self.current_crops = []
         self.crop_info = []  # Store (x, y, w, h) for each crop
-        self.gray_mode = args.gray_mode
+        
         # Settings from arguments
         self.crop_size = (args.crop_width, args.crop_height)
         self.num_crops_per_image = args.num_crops
@@ -118,11 +119,8 @@ class PreferenceDataCollector:
         
         if file_path:
             try:
-                if self.gray_mode:
-                    self.current_image = Image.open(file_path).convert("L")
-                else:
-                    self.current_image = Image.open(file_path)
-                    
+                self.current_image = Image.open(file_path)
+                self.current_image_path = file_path  # Store the path
                 self.status_label.config(text=f"Loaded: {os.path.basename(file_path)}")
                 self.generate_crops()
             except Exception as e:
@@ -203,6 +201,7 @@ class PreferenceDataCollector:
         # Create preference record
         preference_record = {
             'timestamp': datetime.now().isoformat(),
+            'image_path': self.current_image_path,  # Add image path
             'crop_a': {
                 'coordinates': self.crop_info[0],  # (x, y, w, h)
                 'image_size': self.current_image.size  # (width, height)
@@ -300,8 +299,7 @@ def parse_arguments():
                        help='Display width for crop images (default: 300)')
     parser.add_argument('--display-height', type=int, default=300,
                        help='Display height for crop images (default: 300)')
-    parser.add_argument("--gray_mode", action="store_true", help="Process images in grayscale instead of RGB")
-
+    
     # File settings
     parser.add_argument('--output-file', type=str, default=None,
                        help='Default output file for saving preferences (default: prompt user)')
